@@ -27,6 +27,9 @@ class AuditE2E(unittest.TestCase):
                 if (self.command == 'POST' and self.path == '/boat-profiles/b1/engine'
                         and code == 200 and self.server.return_plural):
                     self.server.boat['engines'] = [self.server.boat.pop('engine')]
+                if (self.command == 'POST' and self.path == '/boat-profiles/b1/engine'
+                        and code == 200 and self.server.retain_engine_data):
+                    self.server.boat['engine']['data'] = {'horsePower': 50}
                 return super().respond(code, obj)
 
             def handle_request(self):
@@ -53,6 +56,7 @@ class AuditE2E(unittest.TestCase):
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
         self.server.return_plural = False
+        self.server.retain_engine_data = False
         self.server.retry_denied = False
         self.server.trip_requests = 0
         self.server.auth_reply = None
@@ -84,6 +88,15 @@ class AuditE2E(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.server.boat['engines'][0]['data']['horsePower'], 60)
         self.assertEqual(json.loads(result.stdout)['data']['horsePower'], 60)
+
+    def test_engine_none_can_retain_previous_data(self):
+        self.login()
+        self.server.retain_engine_data = True
+        self.server.boat['engine'] = {'type': 0, 'data': {'horsePower': 50}}
+        result = self.run_cli('engines', 'update', '--type', 'none')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['type'], 4)
+        self.assertEqual(self.server.boat['engine']['data']['horsePower'], 50)
 
     def test_non_utf8_password_file_is_input_error(self):
         password = Path(self.fixture.tmp.name) / 'bad-password'

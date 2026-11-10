@@ -337,7 +337,9 @@ def execute(a):
                 return None
             saved = current[0]
             if obj["type"] == 4:
-                return saved if not saved.get("data") else None
+                # Skippo may retain the previous engine data while marking
+                # the engine type as none; the type is the requested change.
+                return saved
             saved_data = saved.get("data")
             if not isinstance(saved_data, dict):
                 return None

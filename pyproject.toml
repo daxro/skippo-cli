@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "skippo-cli"
+version = "0.1.0"
+description = "An unofficial CLI for Skippo."
+requires-python = ">=3.10"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = ["platformdirs>=4"]
+
+[project.urls]
+Repository = "https://github.com/daxro/skippo-cli"
+Issues = "https://github.com/daxro/skippo-cli/issues"
+
+[project.scripts]
+skippo = "skippo_cli.cli:main"
+
+[tool.setuptools]
+packages = ["skippo_cli"]
+
+[tool.ruff]
+line-length = 100

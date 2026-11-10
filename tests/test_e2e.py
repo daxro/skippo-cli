@@ -56,7 +56,21 @@ class Handler(BaseHTTPRequestHandler):
             if failure == 'shape':
                 return self.respond(200, {'boatProfiles': 'bad'})
             return self.respond(failure, {})
+        if url.path in ('/', '/assets/index-test.js'):
+            if self.headers.get('Authorization') or self.headers.get('id-token'):
+                return self.respond(403, {})
+            if url.path == '/':
+                data = server.config_html.encode()
+            else:
+                data = server.config_js.encode()
+            self.send_response(200)
+            self.send_header('Content-Length', str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if url.path.startswith('/v1/accounts:signInWithPassword'):
+            if parse_qs(url.query).get('key') != ['synthetic-public-config']:
+                return self.respond(400, {})
             if body.get('password') != 'correct':
                 return self.respond(400, {})
             return self.respond(200, {'idToken': 'id-token', 'refreshToken': 'refresh', 'expiresIn': '3600', 'localId': 'user1'})
@@ -78,9 +92,75 @@ class Handler(BaseHTTPRequestHandler):
             if server.trip_pages:
                 return self.respond(200, {'documents': [doc], 'nextPageToken': 'next'} if (not token or server.trip_pages == 'repeat') else {'documents': [doc]})
             return self.respond(200, {'documents': [doc]})
-        if self.headers.get('id-token') != 'id-token' or self.headers.get('target') != 'SE' or self.headers.get('Authorization') != 'Basic ' + base64.b64encode(b'bpClient:nFGce2nYqgz6a6xK').decode():
+        if url.path == '/cdn/a1':
+            if self.headers.get('Authorization') or self.headers.get('id-token'):
+                return self.respond(403, {})
+            data = b'unrelated' if server.cdn_mode == 'mismatch' else server.asset_bytes
+            if server.cdn_mode == 'oversize':
+                self.send_response(200)
+                self.send_header('Content-Length', str(11 * 1024 * 1024))
+                self.end_headers()
+                return
+            if server.cdn_mode == 'truncated':
+                self.send_response(200)
+                self.send_header('Content-Length', '1000')
+                self.end_headers()
+                self.wfile.write(b'partial')
+                return
+            self.send_response(200)
+            self.send_header('Content-Length', str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if self.headers.get('id-token') != 'id-token' or self.headers.get('target') != 'SE' or self.headers.get('Authorization') != 'Basic ' + base64.b64encode(b'bpClient:synthetic-public-client').decode():
             return self.respond(403, {})
         boat = server.boat
+        if url.path == '/insurances/companies/list':
+            return self.respond(200, [{'id': 'co1', 'name': 'Synthetic'}])
+        if url.path == '/boat-profiles/b1/navigation-settings' and self.command == 'POST':
+            boat['navigationSettings'] = dict(body)
+            if 'speedInMs' in boat['navigationSettings']:
+                boat['navigationSettings']['speedInMs'] = round(boat['navigationSettings']['speedInMs'], 2)
+            if server.settings_mismatch:
+                boat['navigationSettings']['safeDepthInMeters'] = 999
+            return self.respond(200, body)
+        if url.path == '/boat-profiles/b1/boat-insurance' and self.command == 'POST':
+            body['id'] = 'ins1'
+            boat['insurance'] = body
+            return self.respond(200, body)
+        if url.path == '/boat-profiles/b1/boat-insurance/insurance/ins1' and self.command == 'DELETE':
+            boat.pop('insurance', None)
+            return self.respond(200, {})
+        if url.path == '/checklists/c1/item' and self.command == 'POST':
+            item = {'id': 'i2', 'type': 0, 'name': parse_qs(url.query)['text'][0], 'checked': False}
+            boat['checklists'][0]['items'].append(item)
+            return self.respond(200, item)
+        if url.path == '/checklists/item/i2' and self.command == 'DELETE':
+            boat['checklists'][0]['items'] = [x for x in boat['checklists'][0]['items'] if x['id'] != 'i2']
+            return self.respond(200, {})
+        if url.path == '/web/assets/add' and self.command == 'POST':
+            query = parse_qs(url.query)
+            if query.get('entityId') != ['e1'] or query.get('entityType') != ['BOAT_PROFILE_EVENT_ASSET'] or self.headers.get('Content-Type') != 'application/octet-stream':
+                return self.respond(400, {})
+            if server.asset_reject:
+                return self.respond(400, {})
+            server.asset_bytes = raw
+            asset = {'id': 'a1', 'originalUrl': f'http://127.0.0.1:{server.server_port}/cdn/a1', 'type': 'IMAGE'}
+            server.events[0].setdefault('assets', []).append(asset)
+            if server.asset_status_error:
+                return self.respond(200, {'status': 'ERROR'})
+            if server.asset_drop:
+                self.close_connection = True
+                self.connection.shutdown(2)
+                self.connection.close()
+                return
+            return self.respond(200, {'status': 'OK'})
+        if url.path == '/web/assets/delete/a1' and self.command == 'DELETE':
+            server.events[0]['assets'] = []
+            return self.respond(200, {'status': 'OK'})
+        if url.path == '/boat-profiles/b1/boat-events/event/e1' and self.command == 'DELETE':
+            server.events = []
+            return self.respond(200, {})
         if url.path == '/boat-profiles' and self.command == 'GET':
             return self.respond(200, {'boatProfiles': [boat] + server.extra_boats, 'user': {}})
         if url.path == '/boat-profiles/b1/base-data' and self.command == 'POST':
@@ -99,7 +179,11 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(200, server.events)
         if url.path == '/boat-profiles/b1/boat-events' and self.command == 'POST':
             body['id'] = 'e1'
-            server.events.append(body)
+            existing = next((i for i, e in enumerate(server.events) if e['id'] == body['id']), None)
+            if existing is None:
+                server.events.append(body)
+            else:
+                server.events[existing] = body
             if server.drop_write:
                 self.close_connection = True
                 self.connection.shutdown(2)
@@ -150,6 +234,11 @@ class E2E(unittest.TestCase):
         self.server.trip_denied = False
         self.server.trip_pages = None
         self.server.revoked = False
+        self.server.config_html = '<script type="module" src="/assets/index-test.js"></script>'
+        self.server.config_js = '{apiKey:`synthetic-dk`,authDomain:`nautical-app-dk.firebaseapp.com`};{apiKey:`synthetic-public-config`,authDomain:`nautical-app-se.firebaseapp.com`};btoa(`bpClient:synthetic-public-client`)'
+        self.server.asset_bytes = b''
+        self.server.cdn_mode = None
+        self.server.asset_drop = self.server.asset_reject = self.server.asset_status_error = self.server.settings_mismatch = False
         self.env = dict(os.environ, TEST_SERVER=f'http://127.0.0.1:{self.server.server_port}', XDG_CONFIG_HOME=self.tmp.name)
         self.env.pop('PYTHONPATH', None)
 
@@ -268,6 +357,128 @@ class E2E(unittest.TestCase):
         refresh.communicate(timeout=5)
         logout.communicate(timeout=5)
         self.assertFalse(session_file.exists())
+
+
+    def test_extended_boat_features(self):
+        self.login()
+        self.cli('settings', 'update', '--safe-depth', '2.5', '--average-speed', '10', '--consumption', '1.2')
+        settings = self.cli('settings', 'show')
+        self.assertEqual(settings['speedInMs'], 5.14)
+        self.cli('settings', 'update', '--safe-height', '8')
+        self.assertEqual(self.cli('settings', 'show')['safeDepthInMeters'], 2.5)
+        self.cli('insurance', 'update', '--company-id', 'co1', '--policy-number', 'SYNTHETIC', '--reminder')
+        self.cli('insurance', 'update', '--expiration-date', '2026-11-10')
+        self.assertEqual(self.cli('insurance', 'show')['insuranceNumber'], 'SYNTHETIC')
+        self.cli('insurance', 'delete', '--yes')
+        self.cli('checklists', 'add-item', 'c1', '--text', 'Line & knot')
+        self.assertEqual(self.server.boat['checklists'][0]['items'][-1]['name'], 'Line & knot')
+        self.cli('checklists', 'delete-item', 'c1', 'i2', '--yes')
+        fuel = self.cli('fuel', 'add', '--type', 'diesel', '--date', '2025-01-02', '--liters', '123.4567891', '--cost', '200', '--source', 'Station')
+        self.assertEqual(fuel['description'], '123.4567891')
+        self.assertEqual(fuel['cost'], {'amount': 200, 'currency': 'SEK'})
+        self.cli('fuel', 'update', 'e1', '--liters', '20', '--price-per-liter', '2.5')
+        self.assertEqual(self.cli('fuel', 'show', 'e1')['cost']['amount'], 50)
+        self.assertEqual(self.cli('fuel', 'show', 'e1')['costSource'], 'Station')
+        self.cli('fuel', 'delete', 'e1', '--yes')
+
+    def test_attachments_upload_download_delete(self):
+        self.login()
+        self.cli('events', 'add', '--title', 'Service', '--date', '2025-01-02', '--category', 'service')
+        data = b'\x89PNG\r\n\x1a\nsynthetic-image'
+        path = Path(self.tmp.name) / 'scan.png'
+        path.write_bytes(data)
+        before = len(self.server.requests)
+        self.cli('attachments', 'upload', 'e1', str(path), '--dry-run')
+        self.assertFalse(any(method != 'GET' for method, _, _ in self.server.requests[before:]))
+        self.cli('attachments', 'upload', 'e1', str(path))
+        self.assertEqual(self.server.asset_bytes, data)
+        item = self.cli('attachments', 'list', 'e1')[0]
+        self.assertNotIn('originalUrl', item)
+        output = Path(self.tmp.name) / 'download.png'
+        self.cli('attachments', 'download', 'e1', 'a1', '--output', str(output))
+        self.assertEqual(output.read_bytes(), data)
+        self.cli('attachments', 'download', 'e1', 'a1', '--output', str(output), code=2)
+        self.server.events[0]['assets'][0]['originalUrl'] = 'https://evil.example/a'
+        self.cli('attachments', 'download', 'e1', 'a1', '--output', str(output) + '2', code=5)
+        self.cli('attachments', 'delete', 'e1', 'a1', '--yes')
+        self.assertEqual(self.cli('attachments', 'list', 'e1'), [])
+
+
+    def test_new_write_failures_and_dry_runs(self):
+        self.login()
+        before = len(self.server.requests)
+        self.cli('settings', 'update', '--safe-depth', '2', '--dry-run')
+        self.cli('insurance', 'update', '--company-id', '-', '--policy-number', 'X', '--dry-run')
+        self.cli('fuel', 'add', '--type', 'diesel', '--date', '2025-01-02', '--dry-run')
+        for value in ('abc', 'NaN', 'sNaN', 'Infinity', '-1'):
+            self.cli('fuel', 'add', '--type', 'diesel', '--date', '2025-01-02', '--liters', value, code=2)
+        self.cli('checklists', 'add-item', 'foreign', '--text', 'X', code=4)
+        self.assertFalse(any(method != 'GET' for method, _, _ in self.server.requests[before:]))
+        self.server.settings_mismatch = True
+        error = self.cli('settings', 'update', '--safe-depth', '2', code=5)
+        self.assertEqual(error['error']['type'], 'written_not_verified')
+
+    def test_attachment_failures_and_pdf(self):
+        self.login()
+        self.cli('events', 'add', '--title', 'Service', '--date', '2025-01-02', '--category', 'service')
+        pdf = b'%PDF-1.4\nsynthetic\n%%EOF\n'
+        path = Path(self.tmp.name) / 'document.pdf'
+        path.write_bytes(pdf)
+        before = len(self.server.requests)
+        self.cli('attachments', 'upload', 'foreign', str(path), code=4)
+        self.cli('attachments', 'delete', 'e1', 'foreign', '--yes', code=4)
+        path.write_bytes(b'invalid')
+        self.cli('attachments', 'upload', 'e1', str(path), code=2)
+        path.write_bytes(b'%PDF-' + b'x' * (10 * 1024 * 1024))
+        self.cli('attachments', 'upload', 'e1', str(path), code=2)
+        self.assertFalse(any(method != 'GET' for method, _, _ in self.server.requests[before:]))
+        path.write_bytes(pdf)
+        self.server.asset_reject = True
+        self.cli('attachments', 'upload', 'e1', str(path), code=5)
+        self.assertFalse(self.server.events[0].get('assets'))
+        self.server.asset_reject = False
+        self.server.asset_status_error = True
+        result = self.cli('attachments', 'upload', 'e1', str(path), code=5)
+        self.assertEqual(result['error']['type'], 'outcome_unknown')
+        self.server.events[0]['assets'] = []
+        self.server.asset_status_error = False
+        self.server.cdn_mode = 'mismatch'
+        result = self.cli('attachments', 'upload', 'e1', str(path), code=5)
+        self.assertEqual(result['error']['type'], 'written_not_verified')
+        self.server.events[0]['assets'] = []
+        self.server.cdn_mode = None
+        self.cli('attachments', 'upload', 'e1', str(path))
+        output = Path(self.tmp.name) / 'saved.pdf'
+        self.cli('attachments', 'download', 'e1', 'a1', '--output', str(output))
+        self.assertEqual(output.read_bytes(), pdf)
+        self.cli('attachments', 'delete', 'e1', 'a1', '--no-input', code=2)
+        for mode in ('oversize', 'truncated'):
+            self.server.cdn_mode = mode
+            target = Path(self.tmp.name) / (mode + '.pdf')
+            self.cli('attachments', 'download', 'e1', 'a1', '--output', str(target), code=5)
+            self.assertFalse(target.exists())
+            self.assertFalse(list(Path(self.tmp.name).glob('.skippo-*')))
+        self.server.cdn_mode = None
+        self.cli('attachments', 'delete', 'e1', 'a1', '--yes')
+        self.server.asset_drop = True
+        before = len(self.server.requests)
+        error = self.cli('attachments', 'upload', 'e1', str(path), code=5)
+        self.assertEqual(error['error']['type'], 'outcome_unknown')
+        self.assertEqual(sum(method == 'POST' and endpoint == '/web/assets/add' for method, endpoint, _ in self.server.requests[before:]), 1)
+
+
+    def test_public_config_selection_and_invalid_documents(self):
+        self.login()
+        self.assertEqual(sum(path == '/assets/index-test.js' for _, path, _ in self.server.requests), 1)
+        for html, script in (
+            ('<script type="module" src="https://evil.test/assets/index-test.js"></script>', self.server.config_js),
+            ('<script type="module" src="/assets/index-legacy-test.js"></script>', ''),
+            ('<script type="module" src="/assets/index-test.js"></script>', '{authDomain:`nautical-app-se.firebaseapp.com`}'),
+            ('<script type="module" src="/assets/index-test.js"></script>', '{apiKey:`synthetic-a`,authDomain:`nautical-app-dk.firebaseapp.com`}'),
+        ):
+            self.server.config_html, self.server.config_js = html, script
+            self.cli('auth', 'login', '--email', 'synthetic@example.test', '--password-stdin', input='correct\n', code=5)
+        self.assertTrue((Path(self.tmp.name) / 'skippo-cli' / 'session.json').exists())
 
 
     def test_written_but_not_verified(self):

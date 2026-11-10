@@ -9,7 +9,7 @@ import re
 import sys
 from urllib.parse import quote
 
-from . import __version__, core
+from . import __version__, assets, core, extended
 from .core import Error
 
 
@@ -64,14 +64,19 @@ def parser():
             a.add_argument("--number-of-engines", type=int)
             a.add_argument("--dry-run", action="store_true")
     checks = subs.add_parser("checklists").add_subparsers(dest="action", required=True)
-    for action in ("list", "show", "check", "uncheck"):
+    for action in ("list", "show", "check", "uncheck", "add-item", "delete-item"):
         a = checks.add_parser(action)
         a.add_argument("--boat")
         if action != "list":
             a.add_argument("id", help="Checklist ID")
-        if action in ("check", "uncheck"):
+        if action in ("check", "uncheck", "delete-item"):
             a.add_argument("item", help="Checklist item ID")
+        if action == "add-item":
+            a.add_argument("--text", required=True)
+        if action in ("check", "uncheck", "add-item", "delete-item"):
             a.add_argument("--dry-run", action="store_true")
+        if action == "delete-item":
+            a.add_argument("--yes", action="store_true")
     for group in ("events", "notes"):
         sub = subs.add_parser(group).add_subparsers(dest="action", required=True)
         actions = ("list", "show", "add") if group == "events" else ("list", "show", "add", "update", "delete")
@@ -96,6 +101,8 @@ def parser():
                 a.add_argument("--dry-run", action="store_true")
             if action == "delete":
                 a.add_argument("--yes", action="store_true")
+    extended.configure(subs, date)
+    assets.configure(subs)
     trips = subs.add_parser("trips").add_subparsers(dest="action", required=True)
     a = trips.add_parser("list")
     a.add_argument("--since", type=date)
@@ -251,10 +258,19 @@ def execute(a):
                 raise Error("Invalid trip date in service response.", 5, "service") from None
             return (not a.since or d >= a.since) and (not a.until or d <= a.until)
         return sorted(filter(include_trip, documents), key=lambda x: x["startTimeInMillis"], reverse=True)[:a.limit]
+    if a.group == "insurance" and a.action == "companies":
+        result = core.hub("/insurances/companies/list")
+        if not isinstance(result, list):
+            raise Error("Invalid insurance companies response.", 5, "service")
+        return result + ([{"id": "-", "name": "Other"}] if not any(str(x.get('id')) == '-' for x in result if isinstance(x, dict)) else [])
     if a.group == "boats" and a.action == "list":
         return profiles()
     b = boat(getattr(a, "boat", None) or (getattr(a, "id", None) if a.group == "boats" else None))
     bid = pathid(b["id"])
+    if a.group == "attachments":
+        return assets.execute(a, b, (find, pathid, collection, extended.confirm))
+    if a.group in ("settings", "insurance", "fuel"):
+        return extended.execute(a, b, (find, pathid, boat, collection, write))
     if a.group == "boats":
         if a.action == "show":
             return b
@@ -305,7 +321,25 @@ def execute(a):
         check = find(lists, a.id, "Checklist")
         if a.action == "show":
             return check
+        if a.action == "add-item":
+            if not a.text.strip() or len(a.text) > 1000:
+                raise Error("Item text must contain 1–1000 characters.", 2, "input")
+            def verify_added(result):
+                if not isinstance(result, dict) or not result.get("id"):
+                    return None
+                fresh = boat(str(b['id']))
+                return find(find(fresh.get('checklists') or [], a.id, 'Checklist').get('items') or [], result['id'], 'Item')
+            return write(f"/checklists/{pathid(a.id)}/item?text={quote(a.text, safe='')}", {}, "POST", a.dry_run, verify_added, f"skippo checklists show {pathid(a.id)} --boat {bid}")
         item = find(check.get("items") or [], a.item, "Checklist item")
+        if a.action == "delete-item":
+            if item.get("type") != 0:
+                raise Error("Only user-created checklist items can be deleted.", 2, "input")
+            extended.confirm(a, "checklist item")
+            def verify_deleted(_):
+                fresh = boat(str(b['id']))
+                items = find(fresh.get('checklists') or [], a.id, 'Checklist').get('items') or []
+                return {"deleted": a.item} if not any(str(x.get('id')) == a.item for x in items) else None
+            return write(f"/checklists/item/{pathid(item['id'])}", None, "DELETE", a.dry_run, verify_deleted, f"skippo checklists show {pathid(a.id)} --boat {bid}")
         checked = a.action == "check"
         def verify(_):
             fresh = boat(str(b['id']))
@@ -393,6 +427,14 @@ def decode_document(doc):
     return result
 
 
+def redact_urls(value):
+    if isinstance(value, dict):
+        return {k: redact_urls(v) for k, v in value.items() if k not in ('originalUrl', 'scaledUrl')}
+    if isinstance(value, list):
+        return [redact_urls(x) for x in value]
+    return value
+
+
 def print_human(value, indent=0):
     prefix = " " * indent
     if isinstance(value, list):
@@ -436,7 +478,7 @@ def main():
         except SystemExit:
             sys.stdout.flush()
             raise
-        result = execute(a)
+        result = redact_urls(execute(a))
         if machine:
             print(json.dumps(result, ensure_ascii=False))
         elif result is not None:

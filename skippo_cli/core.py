@@ -14,8 +14,6 @@ from pathlib import Path
 
 from platformdirs import user_config_dir
 
-API_KEY = "AIzaSyCoTfmf7CxX3IQ-d2vNRFzRfwPs-w5MCpw"
-CLIENT = base64.b64encode(b"bpClient:nFGce2nYqgz6a6xK").decode()
 HUB = "https://nautical-hub.skippo.io"
 IDENTITY = "https://identitytoolkit.googleapis.com"
 TOKEN = "https://securetoken.googleapis.com"
@@ -88,8 +86,10 @@ def request(base, path, *, method="GET", payload=None, headers=None, form=False)
         (base == IDENTITY and method == "POST" and clean_path in ("/v1/accounts:signInWithPassword", "/v1/accounts:lookup"))
         or (base == FIRESTORE and method == "GET" and re.fullmatch(r"/v1/projects/nautical-app-se/databases/\(default\)/documents/users/[^/]+/tracks2026(?:/[^/]+)?", clean_path))
         or (base == TOKEN and method == "POST" and clean_path == "/v1/token")
-        or (base == HUB and method == "GET" and (clean_path == "/boat-profiles" or re.fullmatch(r"/boat-profiles/[^/]+/(?:boat-events|notes)/all", clean_path)))
-        or (base == HUB and method == "POST" and re.fullmatch(r"/boat-profiles/[^/]+/(?:base-data|home-harbor|engine|boat-events|notes/note)", clean_path))
+        or (base == HUB and method == "GET" and (clean_path in ("/boat-profiles", "/insurances/companies/list") or re.fullmatch(r"/boat-profiles/[^/]+/(?:boat-events|notes)/all", clean_path)))
+        or (base == HUB and method == "POST" and re.fullmatch(r"/boat-profiles/[^/]+/(?:base-data|home-harbor|engine|boat-events|notes/note|navigation-settings|boat-insurance)", clean_path))
+        or (base == HUB and method == "POST" and re.fullmatch(r"/checklists/[^/]+/item", clean_path))
+        or (base == HUB and method == "DELETE" and (re.fullmatch(r"/checklists/item/[^/]+", clean_path) or re.fullmatch(r"/boat-profiles/[^/]+/(?:boat-events/event|boat-insurance/insurance)/[^/]+", clean_path)))
         or (base == HUB and method == "PUT" and re.fullmatch(r"/checklists/item/[^/]+", clean_path))
         or (base == HUB and method == "DELETE" and re.fullmatch(r"/boat-profiles/[^/]+/notes/note/[^/]+", clean_path))
     )
@@ -119,7 +119,8 @@ def request(base, path, *, method="GET", payload=None, headers=None, form=False)
 
 
 def login(email, password):
-    result = request(IDENTITY, "/v1/accounts:signInWithPassword?key=" + API_KEY,
+    from .public_config import api_key
+    result = request(IDENTITY, "/v1/accounts:signInWithPassword?key=" + urllib.parse.quote(api_key(), safe=""),
                      method="POST", payload={"email": email, "password": password,
                                              "returnSecureToken": True})
     try:
@@ -132,12 +133,13 @@ def login(email, password):
 
 
 def session(force=False):
+    from .public_config import api_key
     with locked():
         s = read("session.json")
         if not s.get("refresh_token") or not s.get("id_token"):
             raise Error("Not signed in. Run skippo auth login.", 3, "authentication")
         if force or s.get("expires_at", 0) <= time.time() + 60:
-            result = request(TOKEN, "/v1/token?key=" + API_KEY, method="POST", form=True,
+            result = request(TOKEN, "/v1/token?key=" + urllib.parse.quote(api_key(), safe=""), method="POST", form=True,
                              payload={"grant_type": "refresh_token", "refresh_token": s["refresh_token"]})
             try:
                 s = {"id_token": result["id_token"], "refresh_token": result["refresh_token"],
@@ -154,9 +156,14 @@ def logout():
             (directory() / name).unlink(missing_ok=True)
 
 
+def client_header():
+    from .public_config import client
+    return 'Basic ' + base64.b64encode(client().encode()).decode()
+
+
 def hub(path, method="GET", payload=None):
     s = session()
-    headers = {"id-token": s["id_token"], "target": "SE", "Authorization": "Basic " + CLIENT}
+    headers = {"id-token": s["id_token"], "target": "SE", "Authorization": client_header()}
     try:
         return request(HUB, path, method=method, payload=payload, headers=headers)
     except Error as e:
@@ -168,11 +175,12 @@ def hub(path, method="GET", payload=None):
 
 
 def firestore(path):
+    from .public_config import api_key
     s = session()
     if not s.get("uid"):
         with locked():
             s = read("session.json")
-            lookup = request(IDENTITY, "/v1/accounts:lookup?key=" + API_KEY, method="POST", payload={"idToken": s["id_token"]})
+            lookup = request(IDENTITY, "/v1/accounts:lookup?key=" + urllib.parse.quote(api_key(), safe=""), method="POST", payload={"idToken": s["id_token"]})
             try:
                 s["uid"] = lookup["users"][0]["localId"]
             except (KeyError, IndexError, TypeError):

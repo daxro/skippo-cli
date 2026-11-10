@@ -60,6 +60,8 @@ def fetch(url):
             if len(data) > MAX_FILE or (length and len(data) != int(length)):
                 raise Error('Attachment download was incomplete or too large.', 5, 'service')
             return data
+    except urllib.error.HTTPError as e:
+        raise core.http_error(e, service='Attachment download') from None
     except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException):
         raise Error('Attachment download failed.', 5, 'network') from None
 
@@ -95,7 +97,7 @@ def asset_request(path, method, data=None):
             raise Error('Asset service did not confirm the write.', 5, 'service')
         return result
     except urllib.error.HTTPError as e:
-        raise Error(f'Asset service returned HTTP {e.code}.', 3 if e.code in (401, 403) else 4 if e.code == 404 else 5, 'http_error') from None
+        raise core.http_error(e, service='Asset service') from None
     except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException):
         raise Error('Asset service connection failed.', 5, 'network') from None
     except (ValueError, UnicodeDecodeError):
@@ -167,7 +169,9 @@ def execute(a, b, helpers):
         result = asset_request(path, 'DELETE' if a.action == 'delete' else 'POST', None if a.action == 'delete' else data)
     except Error as exc:
         if exc.code == 5:
-            raise Error('Write outcome unknown; inspect with: ' + reconcile, 5, 'outcome_unknown') from None
+            unknown = Error('Write outcome unknown; inspect with: ' + reconcile, 5, 'outcome_unknown')
+            unknown.status, unknown.reason = exc.status, exc.reason
+            raise unknown from None
         raise
     try:
         updated = find(collection(b, 'boat-events'), a.event, 'Event').get('assets')

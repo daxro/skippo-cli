@@ -27,6 +27,8 @@ class Error(Exception):
     def __init__(self, message, code=1, kind="error"):
         super().__init__(message)
         self.code, self.kind = code, kind
+        self.status = None
+        self.reason = None
 
 
 def directory():
@@ -94,6 +96,44 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+# Only expose known provider codes. Arbitrary server messages can contain secrets.
+PROVIDER_REASONS = {
+    "EMAIL_NOT_FOUND", "INVALID_PASSWORD", "INVALID_LOGIN_CREDENTIALS",
+    "INVALID_EMAIL", "USER_DISABLED", "USER_NOT_FOUND", "INVALID_ID_TOKEN",
+    "TOKEN_EXPIRED", "INVALID_REFRESH_TOKEN", "USER_TOKEN_EXPIRED",
+    "TOO_MANY_ATTEMPTS_TRY_LATER", "OPERATION_NOT_ALLOWED", "MISSING_PASSWORD",
+    "PERMISSION_DENIED", "NOT_FOUND", "INVALID_ARGUMENT", "UNAUTHENTICATED",
+    "RESOURCE_EXHAUSTED", "INTERNAL", "UNAVAILABLE", "DEADLINE_EXCEEDED",
+}
+
+
+def http_error(error, *, authentication=False, service="Service"):
+    code = 3 if error.code in (401, 403) or (authentication and error.code == 400) else 4 if error.code == 404 else 5
+    reason = None
+    try:
+        body = error.read(65537)
+        if len(body) <= 65536:
+            data = json.loads(body)
+            item = data.get("error", {}) if isinstance(data, dict) else {}
+            if isinstance(item, dict):
+                # Firebase can append account-specific details after a colon.
+                candidates = [item.get("message"), item.get("status")]
+                for candidate in candidates:
+                    if isinstance(candidate, str):
+                        candidate = candidate.split(":", 1)[0].strip()
+                        if candidate in PROVIDER_REASONS:
+                            reason = candidate
+                            break
+    except (ValueError, OSError, UnicodeDecodeError, http.client.HTTPException):
+        pass
+    message = f"{service} returned HTTP {error.code}"
+    if reason:
+        message += f" ({reason})"
+    result = Error(message + ".", code, "http_error")
+    result.status, result.reason = error.code, reason
+    return result
+
+
 def request(base, path, *, method="GET", payload=None, headers=None, form=False):
     if base not in (HUB, IDENTITY, TOKEN, FIRESTORE) or not path.startswith("/"):
         raise Error("Invalid API target.", 2, "config")
@@ -124,10 +164,7 @@ def request(base, path, *, method="GET", payload=None, headers=None, form=False)
             raise Error("Service response exceeded size limit.", 5, "service")
         return json.loads(raw) if raw else None
     except urllib.error.HTTPError as e:
-        code = 3 if e.code in (401, 403) or (base in (IDENTITY, TOKEN) and e.code == 400) else 4 if e.code == 404 else 5
-        error = Error(f"Service returned HTTP {e.code}.", code, "http_error")
-        error.status = e.code
-        raise error from None
+        raise http_error(e, authentication=base in (IDENTITY, TOKEN)) from None
     except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException):
         raise Error("Could not reach service; check your connection.", 5, "network") from None
     except (ValueError, UnicodeDecodeError):
@@ -237,7 +274,9 @@ def firestore(path):
             return request(FIRESTORE, prefix + path, headers={"Authorization": "Bearer " + s["id_token"]})
         except Error as e:
             if getattr(e, "status", None) == 403:
-                raise Error("Trips access was denied by the service for this account.", 5, "permission_denied") from None
+                denied = Error("Trips access was denied by the service for this account.", 5, "permission_denied")
+                denied.status, denied.reason = e.status, e.reason
+                raise denied from None
             if getattr(e, "status", None) == 401 and attempt == 0:
                 s = session(force=True)
                 continue

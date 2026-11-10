@@ -72,7 +72,7 @@ class Handler(BaseHTTPRequestHandler):
             if parse_qs(url.query).get('key') != ['synthetic-public-config']:
                 return self.respond(400, {})
             if body.get('password') != 'correct':
-                return self.respond(400, {})
+                return self.respond(400, {'error': {'code': 400, 'message': 'EMAIL_NOT_FOUND'}})
             return self.respond(200, {'idToken': 'id-token', 'refreshToken': 'refresh', 'expiresIn': '3600', 'localId': 'user1'})
         if url.path == '/v1/token':
             time.sleep(getattr(server, 'refresh_delay', 0))
@@ -253,6 +253,23 @@ class E2E(unittest.TestCase):
 
     def login(self):
         self.cli('auth', 'login', '--email', 'synthetic@example.test', '--password-stdin', input='correct\n')
+
+    def test_login_provider_reason_in_human_output(self):
+        result = subprocess.run([sys.executable, str(ROOT / 'tests/launcher.py'),
+                                 'auth', 'login', '--email', 'synthetic@example.test',
+                                 '--password-stdin'], input='wrong\n', capture_output=True,
+                                text=True, env=self.env, cwd=self.tmp.name, check=False)
+        self.assertEqual(result.returncode, 3)
+        self.assertEqual(result.stdout, '')
+        self.assertIn('HTTP 400', result.stderr)
+        self.assertIn('EMAIL_NOT_FOUND', result.stderr)
+
+    def test_login_provider_reason_is_reported(self):
+        error = self.cli('auth', 'login', '--email', 'synthetic@example.test',
+                         '--password-stdin', input='wrong\n', code=3)
+        self.assertEqual(error['error']['http_status'], 400)
+        self.assertEqual(error['error']['reason'], 'EMAIL_NOT_FOUND')
+        self.assertIn('EMAIL_NOT_FOUND', error['error']['message'])
 
     def test_full_flow(self):
         self.login()

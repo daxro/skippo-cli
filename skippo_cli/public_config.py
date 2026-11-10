@@ -36,6 +36,8 @@ def fetch(path, limit):
             if len(body) > limit:
                 raise Error('Public configuration response is too large.', 5, 'service')
         return body.decode('utf-8')
+    except urllib.error.HTTPError as e:
+        raise core.http_error(e, service='Public configuration') from None
     except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException, UnicodeDecodeError):
         raise Error('Could not fetch Skippo public configuration.', 5, 'network') from None
 

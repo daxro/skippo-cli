@@ -192,7 +192,9 @@ def write(path, payload, method, dry, verify, reconcile):
         result = core.hub(path, method=method, payload=payload)
     except Error as e:
         if e.code == 5:
-            raise Error(f"Write outcome unknown; inspect with: {reconcile}", 5, "outcome_unknown") from None
+            unknown = Error(f"Write outcome unknown; inspect with: {reconcile}", 5, "outcome_unknown")
+            unknown.status, unknown.reason = e.status, e.reason
+            raise unknown from None
         raise
     try:
         verified = verify(result)
@@ -518,7 +520,17 @@ def main():
         sys.stdout.flush()
         return 0
     except Error as e:
-        print(json.dumps({"error": {"type": e.kind, "message": str(e)}}) if machine else f"Error: {e}", file=sys.stderr)
+        details = {"type": e.kind, "message": str(e)}
+        if e.status is not None:
+            details["http_status"] = e.status
+        if e.reason is not None:
+            details["reason"] = e.reason
+        message = str(e)
+        if e.status is not None and f"HTTP {e.status}" not in message:
+            message += f" (HTTP {e.status})"
+        if e.reason is not None and e.reason not in message:
+            message += f" ({e.reason})"
+        print(json.dumps({"error": details}) if machine else f"Error: {message}", file=sys.stderr)
         return e.code
     except KeyboardInterrupt:
         print(json.dumps({"error": {"type": "interrupted", "message": "Interrupted."}}) if machine else "Interrupted.", file=sys.stderr)

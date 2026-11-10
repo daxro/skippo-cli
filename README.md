@@ -50,7 +50,7 @@ Groups: `auth`, `config`, `boats`, `engines`, `checklists`, `events`, `notes`, `
 
 ## Agent contract
 
-Use `--json` for JSON on stdout, errors as JSON on stderr. `--no-input` disables prompts, but does not authorize deletion. An `outcome_unknown` or `written_not_verified` error means inspect the resource with the supplied command before any further action; do not blindly retry a creation. See [API evidence](docs/api-contracts.md) for source and verification limits.
+Use `--json` for JSON on stdout, errors as JSON on stderr. Provider errors include `http_status` and a safe `reason` code when available, for example `EMAIL_NOT_FOUND`. Exit codes remain separate. Unknown server text is not exposed. `--no-input` disables prompts, but does not authorize deletion. An `outcome_unknown` or `written_not_verified` error means inspect the resource with the supplied command before any further action; do not blindly retry a creation. See [API evidence](docs/api-contracts.md) for source and verification limits.
 
 ## Exit codes
 

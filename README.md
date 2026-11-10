@@ -63,7 +63,7 @@ uv sync
 uv run python -m unittest discover -s tests -v
 ```
 
-Tests use synthetic fixtures and a local HTTP server; credentials are never required. To opt into read-only live tests after logging in, run `SKIPPO_LIVE=1 uv run python -m unittest discover -s tests -p test_live.py`. The test-only launcher binds transport to the simulator and is not shipped.
+Tests use synthetic fixtures and a local HTTP server; credentials are never required. To opt into read-only live tests after logging in, run `SKIPPO_LIVE=1 uv run python -m unittest discover -s tests -p test_live.py`. The test-only launcher binds transport to the simulator and is not shipped. See the [independent E2E audit](docs/e2e-audit.md) for regression coverage and verification boundaries.
 
 ## Security
 

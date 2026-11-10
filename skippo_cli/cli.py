@@ -169,6 +169,22 @@ def collection(b, kind):
     return result
 
 
+def engines(profile):
+    """Normalize the legacy and current single-engine profile representations."""
+    plural = profile.get("engines")
+    singular = profile.get("engine")
+    if plural is not None:
+        if not isinstance(plural, list) or any(not isinstance(x, dict) for x in plural):
+            raise Error("Invalid engines response.", 5, "service")
+        if plural:
+            return plural
+    if singular is not None:
+        if not isinstance(singular, dict):
+            raise Error("Invalid engine response.", 5, "service")
+        return [singular]
+    return []
+
+
 def write(path, payload, method, dry, verify, reconcile):
     if dry:
         return {"dry_run": True, "method": method, "path": path, "body": payload}
@@ -206,7 +222,7 @@ def execute(a):
             try:
                 with open(a.password_file, encoding="utf-8") as f:
                     password = f.read().rstrip("\r\n")
-            except OSError:
+            except (OSError, UnicodeError):
                 raise Error("Could not read password file.", 2, "input") from None
         elif a.password_stdin:
             password = sys.stdin.readline().rstrip("\r\n")
@@ -288,16 +304,17 @@ def execute(a):
         return write(f"/boat-profiles/{bid}/base-data", data, "POST", a.dry_run,
                      lambda _: next((x.get("baseData") for x in profiles() if str(x.get("id")) == str(b['id']) and all((x.get("baseData") or {}).get(k) == v for k, v in changes.items())), None), "skippo boats show " + bid)
     if a.group == "engines":
-        engine = b.get("engine")
+        existing = engines(b)
         if a.action == "list":
-            return b["engines"] if isinstance(b.get("engines"), list) else [engine] if engine else []
-        if not engine and isinstance(b.get("engines"), list):
-            if len(b["engines"]) > 1:
-                raise Error("Multiple engines require explicit selection; this service operation is not established.", 5, "unsupported_schema")
-            engine = b["engines"][0] if b["engines"] else None
+            return existing
+        if len(existing) > 1:
+            raise Error("Multiple engines require explicit selection; this service operation is not established.", 5, "unsupported_schema")
+        engine = existing[0] if existing else None
         if (a.action == "add" and engine) or (a.action == "update" and not engine):
             raise Error("Engine already exists." if engine else "Engine not found.", 2 if engine else 4, "input")
         obj = {k: v for k, v in (engine or {}).items() if k in ("type", "data")}
+        if obj.get("data") is not None and not isinstance(obj["data"], dict):
+            raise Error("Invalid engine data response.", 5, "service")
         data = dict(obj.get("data") or {})
         if a.number_of_engines is not None:
             raise Error("The service did not retain number of engines during verification; this field is unavailable.", 2, "unsupported_schema")
@@ -311,9 +328,22 @@ def execute(a):
             obj["type"] = ["diesel", "petrol", "electric", "other", "none"].index(a.type)
         if "type" not in obj:
             raise Error("--type is required for a new engine.", 2, "input")
+        if obj["type"] == 4 and any(v is not None for v in changes.values()):
+            raise Error("Engine data fields cannot be combined with type none.", 2, "input")
         obj["data"] = None if obj["type"] == 4 else data
+        def verify_engine(_):
+            current = engines(boat(str(b['id'])))
+            if len(current) != 1 or current[0].get("type") != obj["type"]:
+                return None
+            saved = current[0]
+            if obj["type"] == 4:
+                return saved if not saved.get("data") else None
+            saved_data = saved.get("data")
+            if not isinstance(saved_data, dict):
+                return None
+            return saved if all(saved_data.get(k) == v for k, v in data.items()) else None
         return write(f"/boat-profiles/{bid}/engine", obj, "POST", a.dry_run,
-                     lambda _: next((x.get("engine") for x in profiles() if str(x.get("id")) == str(b['id']) and x.get("engine") and x['engine'].get("type") == obj['type'] and all((x['engine'].get('data') or {}).get(k) == v for k,v in data.items()) ), None), "skippo engines list --boat " + bid)
+                     verify_engine, "skippo engines list --boat " + bid)
     if a.group == "checklists":
         lists = b.get("checklists") or []
         if a.action == "list":

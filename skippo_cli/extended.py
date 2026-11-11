@@ -36,6 +36,8 @@ def configure(subs, date):
                     a.add_argument('--company-id')
                     a.add_argument('--policy-number')
                     a.add_argument('--expiration-date', type=date)
+                    a.add_argument('--clear', action='append', choices=('expiration-date',), default=[],
+                                   help='Remove an optional field (repeatable)')
                     reminders = a.add_mutually_exclusive_group()
                     reminders.add_argument('--reminder', action='store_const', const=True, default=None)
                     reminders.add_argument('--no-reminder', dest='reminder', action='store_const', const=False)
@@ -60,6 +62,9 @@ def configure(subs, date):
             prices.add_argument('--price-per-liter', type=decimal_number)
             a.add_argument('--currency', choices=('SEK', 'NOK', 'DKK', 'EUR'))
             a.add_argument('--date', type=date, required=action == 'add')
+            if action == 'update':
+                a.add_argument('--clear', action='append', choices=('liters', 'cost'), default=[],
+                               help='Remove an optional field (repeatable)')
         if action in ('add', 'update', 'delete'):
             a.add_argument('--dry-run', action='store_true')
         if action == 'delete':
@@ -104,7 +109,10 @@ def execute(a, b, helpers):
                     'reminderEnabled': a.reminder}
             path = f'/boat-profiles/{bid}/boat-insurance'
         changes = {k: v for k, v in vals.items() if v is not None}
-        if not changes:
+        cleared = set(getattr(a, 'clear', []))
+        if 'expiration-date' in cleared and a.expiration_date is not None:
+            raise Error('--clear expiration-date cannot be combined with --expiration-date.', 2, 'input')
+        if not changes and not cleared:
             raise Error('Provide at least one field to update.', 2, 'input')
         for value in changes.values():
             if isinstance(value, float) and (not math.isfinite(value) or value < 0):
@@ -115,6 +123,8 @@ def execute(a, b, helpers):
             keys = ('safeDepthInMeters', 'safeHeightInMeters', 'speedInMs', 'fuelConsumptionInLitersPerNm')
         obj = {k: old[k] for k in keys if k in old}
         obj.update(changes)
+        if 'expiration-date' in cleared:
+            obj.pop('expirationDateEpochMs', None)
         if a.group == 'insurance' and not obj.get('insuranceCompanyId'):
             raise Error('Provide --company-id when creating insurance.', 2, 'input')
         if a.group == 'insurance' and a.company_id is not None and a.company_id != '-':
@@ -124,6 +134,8 @@ def execute(a, b, helpers):
             find(companies, a.company_id, 'Insurance company')
         def verify(_):
             fresh = boat(str(b['id'])).get(field) or {}
+            if 'expiration-date' in cleared and fresh.get('expirationDateEpochMs') is not None:
+                return None
             return fresh if all((math.isclose(fresh.get(k), v, rel_tol=0, abs_tol=0.00501) if k == 'speedInMs' and isinstance(fresh.get(k), (float, int)) else fresh.get(k) == v) for k, v in changes.items()) else None
         return write(path, obj, 'POST', a.dry_run, verify, f'skippo {a.group} show --boat {bid}')
     items = [e for e in collection(b, 'boat-events') if e.get('category') == 4]
@@ -140,6 +152,14 @@ def execute(a, b, helpers):
                      f'skippo fuel list --boat {bid}')
     obj = {k: old[k] for k in ('id', 'title', 'description', 'dateEpochMs', 'cost', 'costSource') if old and k in old}
     obj['category'] = 4
+    cleared = set(getattr(a, 'clear', []))
+    if 'liters' in cleared and (a.liters is not None or a.price_per_liter is not None):
+        raise Error('--clear liters cannot be combined with --liters or --price-per-liter.', 2, 'input')
+    if 'cost' in cleared and (a.cost is not None or a.price_per_liter is not None or a.currency is not None):
+        raise Error('--clear cost cannot be combined with a price or currency.', 2, 'input')
+    for name, key in (('liters', 'description'), ('cost', 'cost')):
+        if name in cleared:
+            obj.pop(key, None)
     if a.type is not None:
         obj['title'] = {'gasoline': 'Gasoline', 'diesel': 'Diesel', 'hvo100': 'HVO100'}[a.type]
     if a.date is not None:
@@ -165,7 +185,7 @@ def execute(a, b, helpers):
     if a.cost is not None:
         currency = a.currency or (old or {}).get('cost', {}).get('currency') or 'SEK'
         obj['cost'] = {'amount': a.cost, 'currency': currency}
-    if a.action == 'update' and not any(getattr(a, k) is not None for k in ('type', 'date', 'liters', 'cost', 'source')):
+    if a.action == 'update' and not cleared and not any(getattr(a, k) is not None for k in ('type', 'date', 'liters', 'cost', 'source')):
         raise Error('Provide a field to update.', 2, 'input')
     def attachment_ids(event):
         values = event.get('assets') or []
@@ -178,6 +198,10 @@ def execute(a, b, helpers):
         if not identifier:
             return None
         found = find(collection(b, 'boat-events'), identifier, 'Fuel event')
+        if old and str(identifier) != str(old['id']):
+            return None
+        if any(found.get(key) is not None for name, key in (('liters', 'description'), ('cost', 'cost')) if name in cleared):
+            return None
         if not existing_attachments.issubset(attachment_ids(found)):
             return None
         return found if all(found.get(k) == v for k, v in obj.items()) else None

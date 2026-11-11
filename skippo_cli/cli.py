@@ -39,6 +39,8 @@ def parser():
     a = config.add_parser("set")
     a.add_argument("key", choices=["boat"])
     a.add_argument("value")
+    a = config.add_parser("unset")
+    a.add_argument("key", choices=["boat"])
     boats = subs.add_parser("boats").add_subparsers(dest="action", required=True)
     boats.add_parser("list")
     a = boats.add_parser("show")
@@ -47,6 +49,8 @@ def parser():
     a.add_argument("id", nargs="?")
     a.add_argument("--name")
     a.add_argument("--year", type=int)
+    a.add_argument("--brand", help="Custom boat brand; requires --model")
+    a.add_argument("--model", help="Custom boat model")
     a.add_argument("--dry-run", action="store_true")
     a = boats.add_parser("harbor", help="Set the boat's home harbor coordinates")
     a.add_argument("id", nargs="?")
@@ -61,7 +65,11 @@ def parser():
             a.add_argument("--type", choices=["diesel", "petrol", "electric", "other", "none"])
             a.add_argument("--horsepower", type=float)
             a.add_argument("--year", type=int)
-            a.add_argument("--number-of-engines", type=int)
+            a.add_argument("--brand", help="Custom engine brand; requires --model")
+            a.add_argument("--model", help="Custom engine model")
+            if action == "update":
+                a.add_argument("--serial-number", help="Set engine serial number separately from other engine fields")
+            a.add_argument("--number-of-engines", type=int, help=argparse.SUPPRESS)
             a.add_argument("--dry-run", action="store_true")
     checks = subs.add_parser("checklists").add_subparsers(dest="action", required=True)
     for action in ("list", "show", "check", "uncheck", "add-item", "delete-item"):
@@ -79,7 +87,7 @@ def parser():
             a.add_argument("--yes", action="store_true")
     for group in ("events", "notes"):
         sub = subs.add_parser(group).add_subparsers(dest="action", required=True)
-        actions = ("list", "show", "add") if group == "events" else ("list", "show", "add", "update", "delete")
+        actions = ("list", "show", "add", "update") if group == "events" else ("list", "show", "add", "update", "delete")
         for action in actions:
             a = sub.add_parser(action)
             a.add_argument("--boat")
@@ -95,8 +103,11 @@ def parser():
                     a.add_argument("--content")
                 else:
                     a.add_argument("--description")
-                    a.add_argument("--date", type=date, required=True)
-                    a.add_argument("--category", choices=["purchase", "installation", "repair", "service", "fuel", "other"], required=True)
+                    a.add_argument("--date", type=date, required=action == "add")
+                    a.add_argument("--category", choices=["purchase", "installation", "repair", "service", "fuel", "other"], required=action == "add")
+                    a.add_argument("--cost", type=float)
+                    a.add_argument("--currency", choices=["SEK", "NOK", "DKK", "EUR"])
+                    a.add_argument("--source")
             if action in ("add", "update", "delete"):
                 a.add_argument("--dry-run", action="store_true")
             if action == "delete":
@@ -136,6 +147,23 @@ def pathid(value):
     if not isinstance(value, (str, int)) or not str(value) or "/" in str(value) or str(value) in (".", ".."):
         raise Error("Invalid resource ID.", 2, "input")
     return quote(str(value), safe="")
+
+
+def custom_brand(existing, brand, model):
+    if brand is None and model is None:
+        return existing
+    if brand is not None and (not brand.strip() or model is None):
+        raise Error("--brand must be non-empty and requires --model.", 2, "input")
+    if model is None or not model.strip():
+        raise Error("--model must be non-empty.", 2, "input")
+    if brand is None:
+        if not isinstance(existing, dict) or not existing.get("id") or not existing.get("name"):
+            raise Error("--model requires an existing brand or --brand.", 2, "input")
+        result = dict(existing)
+    else:
+        result = {"id": "-", "name": brand}
+    result["model"] = {"id": "-", "name": model}
+    return result
 
 
 def profiles():
@@ -239,6 +267,13 @@ def execute(a):
     if a.group == "config":
         if a.action == "get":
             return core.read("config.json")
+        if a.action == "unset":
+            with core.locked():
+                config = core.read("config.json")
+                if "boat" in config:
+                    del config["boat"]
+                    core.save("config.json", config)
+            return config
         b = find(profiles(), a.value, "Boat")
         with core.locked():
             config = core.read("config.json")
@@ -299,9 +334,11 @@ def execute(a):
             return write(f"/boat-profiles/{bid}/home-harbor", coordinate, "POST", a.dry_run,
                          lambda _: next((x.get("homeHarbor") for x in profiles() if str(x.get("id")) == str(b['id']) and (x.get("homeHarbor") or {}).get("coordinate") == coordinate), None), "skippo boats show " + bid)
         changes = {k: v for k, v in {"name": a.name, "year": a.year}.items() if v is not None}
-        if not changes or (a.year is not None and not 1800 <= a.year <= 2100):
-            raise Error("Provide valid --name or --year (1800–2100).", 2, "input")
         data = dict(b.get("baseData") or {})
+        if a.brand is not None or a.model is not None:
+            changes["brand"] = custom_brand(data.get("brand"), a.brand, a.model)
+        if not changes or (a.year is not None and not 1800 <= a.year <= 2100):
+            raise Error("Provide a valid boat field; year must be 1800–2100.", 2, "input")
         data.update(changes)
         return write(f"/boat-profiles/{bid}/base-data", data, "POST", a.dry_run,
                      lambda _: next((x.get("baseData") for x in profiles() if str(x.get("id")) == str(b['id']) and all((x.get("baseData") or {}).get(k) == v for k, v in changes.items())), None), "skippo boats show " + bid)
@@ -314,6 +351,20 @@ def execute(a):
         engine = existing[0] if existing else None
         if (a.action == "add" and engine) or (a.action == "update" and not engine):
             raise Error("Engine already exists." if engine else "Engine not found.", 2 if engine else 4, "input")
+        serial = getattr(a, "serial_number", None)
+        if serial is not None:
+            if not serial.strip() or any(v is not None for v in (a.type, a.horsepower, a.year, a.number_of_engines, a.brand, a.model)):
+                raise Error("Provide a non-empty --serial-number separately from other engine fields.", 2, "input")
+            safety = b.get("safety") or {}
+            if not isinstance(safety, dict):
+                raise Error("Invalid safety response.", 5, "service")
+            obj = dict(safety)
+            obj["engineNumber"] = serial
+            def verify_serial(_):
+                fresh = boat(str(b['id'])).get("safety") or {}
+                return fresh if isinstance(fresh, dict) and all(fresh.get(k) == v for k, v in obj.items()) else None
+            return write(f"/boat-profiles/{bid}/safety", obj, "POST", a.dry_run,
+                         verify_serial, "skippo boats show " + bid)
         obj = {k: v for k, v in (engine or {}).items() if k in ("type", "data")}
         if obj.get("data") is not None and not isinstance(obj["data"], dict):
             raise Error("Invalid engine data response.", 5, "service")
@@ -321,16 +372,18 @@ def execute(a):
         if a.number_of_engines is not None:
             raise Error("The service did not retain number of engines during verification; this field is unavailable.", 2, "unsupported_schema")
         changes = {"horsePower": a.horsepower, "year": a.year, "numberOfEngines": a.number_of_engines}
-        if all(v is None for v in changes.values()) and a.type is None:
+        if all(v is None for v in changes.values()) and a.type is None and a.brand is None and a.model is None:
             raise Error("Provide an engine field.", 2, "input")
         if any(v is not None and (not math.isfinite(v) or v <= 0) for v in changes.values()) or (a.year is not None and not 1800 <= a.year <= 2100):
             raise Error("Engine numeric fields must be finite and positive; year must be 1800–2100.", 2, "input")
         data.update({k: v for k, v in changes.items() if v is not None})
+        if a.brand is not None or a.model is not None:
+            data['brand'] = custom_brand(data.get('brand'), a.brand, a.model)
         if a.type is not None:
             obj["type"] = ["diesel", "petrol", "electric", "other", "none"].index(a.type)
         if "type" not in obj:
             raise Error("--type is required for a new engine.", 2, "input")
-        if obj["type"] == 4 and any(v is not None for v in changes.values()):
+        if obj["type"] == 4 and (any(v is not None for v in changes.values()) or a.brand is not None or a.model is not None):
             raise Error("Engine data fields cannot be combined with type none.", 2, "input")
         obj["data"] = None if obj["type"] == 4 else data
         def verify_engine(_):
@@ -420,16 +473,50 @@ def execute(a):
             matches = [x for x in fresh if x.get('title') == obj['title'] and x.get('content', '') == obj['content'] and (not old or str(x.get('id')) == str(old['id'])) and (old or all(str(x.get('id')) != str(y.get('id')) for y in items))]
             return matches[0] if len(matches) == 1 else None
         return write(prefix + "/note", obj, "POST", a.dry_run, verify_notes, f"skippo notes list --boat {bid}")
-    obj = {"category": ["purchase", "installation", "repair", "service", "fuel", "other"].index(a.category), "title": a.title,
-           "dateEpochMs": int(dt.datetime.combine(a.date, dt.time(), dt.timezone.utc).timestamp() * 1000)}
-    if a.description:
-        obj["description"] = a.description
+    categories = ["purchase", "installation", "repair", "service", "fuel", "other"]
+    fields = ("id", "category", "title", "description", "dateEpochMs", "cost", "costSource")
+    obj = {k: old[k] for k in fields if old and k in old}
+    changes = {}
+    if a.category is not None:
+        changes["category"] = categories.index(a.category)
+    if a.title is not None:
+        if not a.title.strip():
+            raise Error("Title must not be empty.", 2, "input")
+        changes["title"] = a.title
+    if a.description is not None:
+        changes["description"] = a.description
+    if a.date is not None:
+        changes["dateEpochMs"] = int(dt.datetime.combine(a.date, dt.time(), dt.timezone.utc).timestamp() * 1000)
+    if a.source is not None:
+        changes["costSource"] = a.source
+    if a.cost is not None:
+        if not math.isfinite(a.cost) or a.cost < 0:
+            raise Error("Cost must be finite and non-negative.", 2, "input")
+        old_cost = obj.get("cost") if isinstance(obj.get("cost"), dict) else {}
+        changes["cost"] = {"amount": a.cost, "currency": a.currency or old_cost.get("currency") or "SEK"}
+    elif a.currency is not None:
+        old_cost = obj.get("cost")
+        if not isinstance(old_cost, dict) or "amount" not in old_cost:
+            raise Error("--currency requires an existing cost or --cost.", 2, "input")
+        changes["cost"] = {"amount": old_cost["amount"], "currency": a.currency}
+    if not changes:
+        raise Error("Provide a field to update.", 2, "input")
+    obj.update(changes)
+    def asset_ids(event):
+        value = event.get("assets") or []
+        if not isinstance(value, list) or any(not isinstance(x, dict) or not x.get("id") for x in value):
+            raise Error("Invalid event attachment metadata.", 5, "service")
+        return {str(x["id"]) for x in value}
+    original_assets = asset_ids(old) if old else set()
     def verify_events(result):
-        fresh = collection(b, kind)
-        if isinstance(result, dict) and result.get('id'):
-            found = find(fresh, result['id'], 'Event')
-            return found if all(found.get(k) == v for k, v in obj.items()) else None
-        return None
+        if not isinstance(result, dict) or not result.get("id"):
+            return None
+        if old and str(result["id"]) != str(old["id"]):
+            return None
+        found = find(collection(b, kind), result["id"], "Event")
+        if not original_assets.issubset(asset_ids(found)):
+            return None
+        return found if all(found.get(k) == v for k, v in obj.items()) else None
     return write(prefix, obj, "POST", a.dry_run, verify_events, f"skippo events list --boat {bid}")
 
 

@@ -1,6 +1,6 @@
 # API contract evidence
 
-The source is the public My Boat web client. "Live" means a read through this CLI against a real account; it does not establish write behavior. Synthetic tests exercise an independent local HTTP service, not Skippo. The service is undocumented and can change.
+The source is the public My Boat web client. "Live" identifies operations exercised against Skippo; the table states whether each test read or wrote data and whether it used the CLI or a direct request. Synthetic tests exercise an independent local HTTP service, not Skippo. The service is undocumented and can change.
 
 | Operation | Source contract | Synthetic E2E | Live |
 | --- | --- | --- | --- |
@@ -20,6 +20,11 @@ The source is the public My Boat web client. "Live" means a read through this CL
 | Insurance | profile `insurance`; GET /insurances/companies/list; POST /boat-profiles/{id}/boat-insurance; DELETE /boat-profiles/{id}/boat-insurance/insurance/{id} | yes | update/delete temporary boat |
 | Events list/show | GET /boat-profiles/{id}/boat-events/all | yes | yes, empty and populated on temporary boat |
 | Events add | POST /boat-profiles/{id}/boat-events | yes | yes, isolated temporary boat |
+| Events update | POST /boat-profiles/{id}/boat-events, existing ID | yes | title/category/zero cost on temporary event, attachment retained |
+| Custom boat/engine brand and model | `baseData.brand` / `engine.data.brand`, custom ID `-` | yes | CLI write/read on temporary boat |
+| Engine serial | POST /boat-profiles/{id}/safety, `engineNumber` | yes | CLI write/read on temporary boat |
+| Clear insurance expiry and fuel litres/cost | Omit field in full replacement payload | yes | CLI write/read on temporary boat |
+| Unset default boat | Local configuration only | yes | not applicable |
 | Notes list/show | GET /boat-profiles/{id}/notes/all | yes | yes, empty and populated on temporary boat |
 | Notes add/update | POST /boat-profiles/{id}/notes/note | yes | yes, isolated temporary boat |
 | Notes delete | DELETE /boat-profiles/{id}/notes/note/{id} | yes | yes, isolated temporary boat |
@@ -32,3 +37,5 @@ The service dropped `numberOfEngines` from a live write response; the CLI blocks
 The fuel quick-entry client stores litres as the event description and does not define tank level or a separately persisted unit price. The web client supports adding and deleting user-created checklist items but does not establish whole-list creation, item rename, or reordering. Built-in checklist completion may be inferred by the client from safety and insurance fields; the CLI returns raw service values. Attachments use the source `IMAGE` upload type for all files; the backend also accepted PDF and returned original bytes, but the app picker and preview do not establish native PDF support. CDN downloads use no account headers.
 
 Live verification of version 0.2.2 confirmed that setting engine type to none may retain previous engine data in the service response; the type change is the verified result. Fuel-event attachments remained available after a live update. Tests used temporary boats, whose removal was verified.
+
+Omission and explicit null did not clear navigation safe depth in a live test, so no navigation clearing flag is offered. Insurance expiry and fuel litres/cost were removed by omission and verified after readback; other clearing semantics remain unverified. Custom boat and engine brands and models use the web client's `-` identifier; catalog selection is not implemented. The web client stores the engine serial as `safety.engineNumber`, separately from engine details. The app source provides no verified contract for checklist list creation, list or item rename, or reordering, or for selecting and updating a particular engine in a multi-engine profile. Home harbor name editing and conditional version writes are also unverified. Writes use read-modify-write and cannot prevent concurrent edits from being overwritten.

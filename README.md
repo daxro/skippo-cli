@@ -30,10 +30,13 @@ Run `skippo --help` and `skippo COMMAND --help` for options.
 ```sh
 skippo boats show
 skippo boats update --name "My boat" --dry-run
+skippo boats update --brand "Example" --model "Model" --dry-run
 skippo boats harbor --latitude 59.0 --longitude 18.0 --dry-run
 skippo engines list
+skippo engines update --serial-number SERIAL --dry-run
 skippo checklists list
 skippo events list --since 2025-01-01
+skippo events update EVENT_ID --title "Annual service" --cost 1200 --currency SEK
 skippo notes list
 skippo fuel add --type diesel --date 2025-01-02 --liters 20 --price-per-liter 18 --currency SEK
 skippo checklists add-item CHECKLIST_ID --text "Check ropes"
@@ -43,6 +46,9 @@ skippo attachments download EVENT_ID ATTACHMENT_ID --output receipt.pdf
 skippo settings update --safe-depth 2 --average-speed 15 --consumption 1.2
 skippo insurance companies
 skippo insurance update --company-id COMPANY_ID --policy-number POLICY_NUMBER
+skippo insurance update --clear expiration-date
+skippo fuel update EVENT_ID --clear liters --clear cost
+skippo config unset boat
 skippo trips list --limit 20
 ```
 
@@ -72,6 +78,12 @@ See [SECURITY.md](SECURITY.md). Do not share session files or tokens. Network re
 ## Feature details
 
 Fuel records use the app's event schema: the fuel name is the event title, litres are stored as text in its description, and cost is a total with currency (SEK by default). `--price-per-liter` with `--liters` calculates total cost; unit price is not separately stored. Tank level is not exposed by the discovered app contract.
+
+`events update` changes only specified fields and checks that the original ID and attachment IDs remain present. A category change to or from fuel changes how the app interprets the title and description: fuel uses these for fuel type and litres. Updates read the current object and write it back; Skippo has no verified version precondition, so a concurrent change between the read and write may be overwritten. Check the record before retrying a failed verification.
+
+For insurance, `--clear expiration-date` removes the expiry. For fuel, `--clear liters` and `--clear cost` remove those values; each `--clear` may be repeated. Omitting a flag preserves its value, and zero remains a value. Conflicting set and clear flags fail. Clearing navigation settings or engine data is not supported because a reliable clearing contract has not been established.
+
+`boats update` and `engines add/update` accept `--brand NAME --model NAME` as a custom brand and model; `--model NAME` alone keeps an existing brand. Custom entries are not linked to the Skippo catalog. The engine serial number is stored in the boat's safety data: use `engines update --serial-number SERIAL` separately from other engine changes. Individual updates to multiple engines and editing the harbor name are not established.
 
 Binder attachments belong to events. Upload and download support JPEG, PNG, GIF, WebP and PDF files up to 10 MiB; downloads require an explicit new path and never overwrite. The service accepted a PDF and returned its original bytes in a live temporary-boat test. The app's picker is image-only and its PDF preview is unverified. Attachment URLs are suppressed from command output.
 

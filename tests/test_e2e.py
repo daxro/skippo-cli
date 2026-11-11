@@ -172,6 +172,9 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == '/boat-profiles/b1/engine' and self.command == 'POST':
             boat['engine'] = body
             return self.respond(200, body)
+        if url.path == '/boat-profiles/b1/safety' and self.command == 'POST':
+            boat['safety'] = body
+            return self.respond(200, body)
         if url.path == '/checklists/item/i1' and self.command == 'PUT':
             boat['checklists'][0]['items'][0]['checked'] = parse_qs(url.query)['checked'][0] == 'true'
             return self.respond(200, {})
@@ -270,6 +273,80 @@ class E2E(unittest.TestCase):
         self.assertEqual(error['error']['http_status'], 400)
         self.assertEqual(error['error']['reason'], 'EMAIL_NOT_FOUND')
         self.assertIn('EMAIL_NOT_FOUND', error['error']['message'])
+
+    def test_event_update_preserves_fields_and_id(self):
+        self.login()
+        self.server.events = [{'id': 'e1', 'category': 3, 'title': 'Before',
+                               'dateEpochMs': 1735821296789, 'description': 'Keep',
+                               'cost': {'amount': 0, 'currency': 'SEK'}, 'costSource': 'Dock'}]
+        event = self.cli('events', 'update', 'e1', '--title', 'After')
+        self.assertEqual(event['id'], 'e1')
+        self.assertEqual(event['dateEpochMs'], 1735821296789)
+        self.assertEqual(event['description'], 'Keep')
+        self.assertEqual(event['cost'], {'amount': 0, 'currency': 'SEK'})
+        self.assertEqual(event['costSource'], 'Dock')
+        before = len(self.server.requests)
+        self.cli('events', 'update', 'e1', '--cost', '0', '--dry-run')
+        self.assertFalse(any(m != 'GET' for m, _, _ in self.server.requests[before:]))
+        self.cli('events', 'update', 'missing', '--title', 'X', code=4)
+
+    def test_event_update_detects_lost_attachments(self):
+        self.login()
+        self.server.events = [{'id': 'e1', 'category': 3, 'title': 'Before',
+                               'dateEpochMs': 1735821296789,
+                               'assets': [{'id': 'a1', 'type': 'IMAGE'}]}]
+        error = self.cli('events', 'update', 'e1', '--title', 'After', code=5)
+        self.assertEqual(error['error']['type'], 'written_not_verified')
+
+    def test_unset_default_boat_is_local_and_idempotent(self):
+        directory = Path(self.tmp.name) / 'skippo-cli'
+        directory.mkdir(mode=0o700)
+        (directory / 'config.json').write_text(json.dumps({'boat': 'b1', 'other': 0}))
+        self.assertEqual(self.cli('config', 'unset', 'boat'), {'other': 0})
+        self.assertEqual(self.cli('config', 'unset', 'boat'), {'other': 0})
+        self.assertEqual(self.server.requests, [])
+
+    def test_clear_insurance_and_fuel_optional_fields(self):
+        self.login()
+        self.cli('insurance', 'update', '--company-id', 'co1', '--policy-number', 'P',
+                 '--expiration-date', '2030-01-01')
+        self.cli('insurance', 'update', '--clear', 'expiration-date')
+        self.assertNotIn('expirationDateEpochMs', self.server.boat['insurance'])
+        self.assertEqual(self.server.boat['insurance']['insuranceNumber'], 'P')
+        self.cli('insurance', 'update', '--clear', 'expiration-date',
+                 '--expiration-date', '2031-01-01', code=2)
+        self.cli('fuel', 'add', '--type', 'diesel', '--date', '2025-01-02',
+                 '--liters', '12', '--cost', '50', '--source', 'Dock')
+        self.cli('fuel', 'update', 'e1', '--clear', 'liters', '--clear', 'cost')
+        event = self.server.events[0]
+        self.assertNotIn('description', event)
+        self.assertNotIn('cost', event)
+        self.assertEqual(event['costSource'], 'Dock')
+        self.cli('fuel', 'update', 'e1', '--clear', 'liters', '--liters', '0', code=2)
+        self.cli('fuel', 'update', 'e1', '--clear', 'cost', '--cost', '0', code=2)
+        self.cli('fuel', 'update', 'e1', '--liters', '0', '--cost', '0')
+        self.assertEqual(self.server.events[0]['description'], '0')
+        self.assertEqual(self.server.events[0]['cost']['amount'], 0)
+
+    def test_custom_boat_and_engine_details_preserve_other_fields(self):
+        self.login()
+        self.cli('boats', 'update', '--brand', 'Example', '--model', 'One')
+        base = self.server.boat['baseData']
+        self.assertEqual(base['brand'], {'id': '-', 'name': 'Example', 'model': {'id': '-', 'name': 'One'}})
+        self.assertEqual(base['year'], 2000)
+        self.cli('boats', 'update', '--model', 'Two')
+        self.assertEqual(self.server.boat['baseData']['brand']['model']['name'], 'Two')
+        self.cli('boats', 'update', '--brand', 'Incomplete', code=2)
+        self.cli('engines', 'add', '--type', 'petrol', '--horsepower', '50',
+                 '--brand', 'Maker', '--model', 'Motor')
+        engine = self.server.boat['engine']
+        self.assertEqual(engine['data']['brand']['model']['name'], 'Motor')
+        self.cli('engines', 'update', '--model', 'Motor 2')
+        self.assertEqual(self.server.boat['engine']['data']['horsePower'], 50)
+        self.server.boat['safety'] = {'hullNumber': 'HULL'}
+        self.cli('engines', 'update', '--serial-number', 'SERIAL')
+        self.assertEqual(self.server.boat['safety'], {'hullNumber': 'HULL', 'engineNumber': 'SERIAL'})
+        self.cli('engines', 'update', '--serial-number', 'X', '--year', '2020', code=2)
 
     def test_full_flow(self):
         self.login()

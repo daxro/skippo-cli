@@ -69,7 +69,6 @@ def parser():
             a.add_argument("--model", help="Custom engine model")
             if action == "update":
                 a.add_argument("--serial-number", help="Set engine serial number separately from other engine fields")
-            a.add_argument("--number-of-engines", type=int, help=argparse.SUPPRESS)
             a.add_argument("--dry-run", action="store_true")
     checks = subs.add_parser("checklists").add_subparsers(dest="action", required=True)
     for action in ("list", "show", "check", "uncheck", "add-item", "delete-item"):
@@ -353,7 +352,7 @@ def execute(a):
             raise Error("Engine already exists." if engine else "Engine not found.", 2 if engine else 4, "input")
         serial = getattr(a, "serial_number", None)
         if serial is not None:
-            if not serial.strip() or any(v is not None for v in (a.type, a.horsepower, a.year, a.number_of_engines, a.brand, a.model)):
+            if not serial.strip() or any(v is not None for v in (a.type, a.horsepower, a.year, a.brand, a.model)):
                 raise Error("Provide a non-empty --serial-number separately from other engine fields.", 2, "input")
             safety = b.get("safety") or {}
             if not isinstance(safety, dict):
@@ -369,9 +368,7 @@ def execute(a):
         if obj.get("data") is not None and not isinstance(obj["data"], dict):
             raise Error("Invalid engine data response.", 5, "service")
         data = dict(obj.get("data") or {})
-        if a.number_of_engines is not None:
-            raise Error("The service did not retain number of engines during verification; this field is unavailable.", 2, "unsupported_schema")
-        changes = {"horsePower": a.horsepower, "year": a.year, "numberOfEngines": a.number_of_engines}
+        changes = {"horsePower": a.horsepower, "year": a.year}
         if all(v is None for v in changes.values()) and a.type is None and a.brand is None and a.model is None:
             raise Error("Provide an engine field.", 2, "input")
         if any(v is not None and (not math.isfinite(v) or v <= 0) for v in changes.values()) or (a.year is not None and not 1800 <= a.year <= 2100):
@@ -430,7 +427,9 @@ def execute(a):
         checked = a.action == "check"
         def verify(_):
             fresh = boat(str(b['id']))
-            return find(find(fresh.get('checklists') or [], a.id, 'Checklist').get('items') or [], a.item, 'Item') if find(find(fresh.get('checklists') or [], a.id, 'Checklist').get('items') or [], a.item, 'Item').get('checked') == checked else None
+            checklist = find(fresh.get('checklists') or [], a.id, 'Checklist')
+            saved = find(checklist.get('items') or [], a.item, 'Item')
+            return saved if saved.get('checked') == checked else None
         return write(f"/checklists/item/{pathid(item['id'])}?checked={str(checked).lower()}", {}, "PUT", a.dry_run, verify, f"skippo checklists show {pathid(a.id)} --boat {bid}")
     kind = "boat-events" if a.group == "events" else "notes"
     items = collection(b, kind)
@@ -449,15 +448,10 @@ def execute(a):
     old = find(items, a.id, a.group[:-1].title()) if a.action in ("show", "update", "delete") else None
     if a.action == "show":
         return old
-    if a.action == "delete" and not a.dry_run and not a.yes:
-        if a.no_input or not sys.stdin.isatty():
-            raise Error("Deletion requires --yes in non-interactive mode.", 2, "input")
-        print("Delete this note? [y/N] ", end="", file=sys.stderr, flush=True)
-        if sys.stdin.readline().strip().lower() not in ("y", "yes"):
-            raise Error("Deletion cancelled.", 2, "cancelled")
     prefix = f"/boat-profiles/{bid}/{kind}"
     if a.group == "notes":
         if a.action == "delete":
+            extended.confirm(a, "note")
             return write(prefix + "/note/" + pathid(a.id), {}, "DELETE", a.dry_run,
                          lambda _: {"deleted": a.id} if not any(str(x.get("id")) == a.id for x in collection(b, kind)) else None, f"skippo notes list --boat {bid}")
         obj = dict(old or {})
@@ -502,19 +496,14 @@ def execute(a):
     if not changes:
         raise Error("Provide a field to update.", 2, "input")
     obj.update(changes)
-    def asset_ids(event):
-        value = event.get("assets") or []
-        if not isinstance(value, list) or any(not isinstance(x, dict) or not x.get("id") for x in value):
-            raise Error("Invalid event attachment metadata.", 5, "service")
-        return {str(x["id"]) for x in value}
-    original_assets = asset_ids(old) if old else set()
+    original_assets = assets.attachment_ids(old) if old else set()
     def verify_events(result):
         if not isinstance(result, dict) or not result.get("id"):
             return None
         if old and str(result["id"]) != str(old["id"]):
             return None
         found = find(collection(b, kind), result["id"], "Event")
-        if not original_assets.issubset(asset_ids(found)):
+        if not original_assets.issubset(assets.attachment_ids(found)):
             return None
         return found if all(found.get(k) == v for k, v in obj.items()) else None
     return write(prefix, obj, "POST", a.dry_run, verify_events, f"skippo events list --boat {bid}")

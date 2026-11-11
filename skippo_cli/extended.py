@@ -5,7 +5,7 @@ import math
 import sys
 from decimal import Decimal, InvalidOperation
 
-from . import core
+from . import assets, core
 from .core import Error
 
 
@@ -187,12 +187,7 @@ def execute(a, b, helpers):
         obj['cost'] = {'amount': a.cost, 'currency': currency}
     if a.action == 'update' and not cleared and not any(getattr(a, k) is not None for k in ('type', 'date', 'liters', 'cost', 'source')):
         raise Error('Provide a field to update.', 2, 'input')
-    def attachment_ids(event):
-        values = event.get('assets') or []
-        if not isinstance(values, list) or any(not isinstance(x, dict) or not x.get('id') for x in values):
-            raise Error('Invalid fuel attachment metadata.', 5, 'service')
-        return {str(x['id']) for x in values}
-    existing_attachments = attachment_ids(old) if old else set()
+    existing_attachments = assets.attachment_ids(old) if old else set()
     def verify(result):
         identifier = (result or {}).get('id') if isinstance(result, dict) else None
         if not identifier:
@@ -202,7 +197,7 @@ def execute(a, b, helpers):
             return None
         if any(found.get(key) is not None for name, key in (('liters', 'description'), ('cost', 'cost')) if name in cleared):
             return None
-        if not existing_attachments.issubset(attachment_ids(found)):
+        if not existing_attachments.issubset(assets.attachment_ids(found)):
             return None
         return found if all(found.get(k) == v for k, v in obj.items()) else None
     return write(prefix, obj, 'POST', a.dry_run, verify, f'skippo fuel list --boat {bid}')

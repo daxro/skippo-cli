@@ -120,6 +120,13 @@ def clean(asset):
     return {k: v for k, v in asset.items() if k not in ('originalUrl', 'scaledUrl')}
 
 
+def attachment_ids(event):
+    values = event.get('assets') or []
+    if not isinstance(values, list) or any(not isinstance(x, dict) or not x.get('id') for x in values):
+        raise Error('Invalid attachment metadata.', 5, 'service')
+    return {str(x['id']) for x in values}
+
+
 def execute(a, b, helpers):
     find, pathid, collection, confirm = helpers
     bid, eid = pathid(b['id']), pathid(a.event)
